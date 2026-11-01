@@ -922,3 +922,53 @@ def test_pinecone_add_documents_batches(monkeypatch):
     ]
     db.add_documents(docs)
     assert index.upserted == [2, 2, 1]
+
+
+def test_pinecone_clear_empty_collections_only_deletes_empty(monkeypatch):
+    """
+    clear_empty_collections must delete only indexes with total_vector_count == 0.
+    Indexes with vectors must be left alone, and indexes whose stats cannot be read
+    (count == -1) must also be skipped rather than deleted.
+    Reproduces the bug described in issue #1284.
+    """
+    from langroid.vector_store import pineconedb as pinecone_module
+    from langroid.vector_store.pineconedb import IndexMeta
+
+    counts = {"empty-idx": 0, "full-idx": 42, "unreadable-idx": -1}
+    deleted: List[str] = []
+
+    monkeypatch.setenv("PINECONE_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(pinecone_module, "has_pinecone", True)
+    monkeypatch.setattr(pinecone_module, "PineconeApiException", _RejectedUpsert)
+    monkeypatch.setattr(
+        pinecone_module,
+        "Pinecone",
+        lambda api_key=None: SimpleNamespace(
+            Index=lambda name: SimpleNamespace(
+                describe_index_stats=lambda: {"total_vector_count": counts[name]}
+            ),
+            list_indexes=lambda: SimpleNamespace(names=lambda: list(counts)),
+            delete_index=lambda name: deleted.append(name),
+        ),
+    )
+    monkeypatch.setattr(PineconeDB, "create_collection", lambda self, *a, **k: None)
+    # Stub _fetch_index_meta to return our controlled counts (including the -1 case)
+    monkeypatch.setattr(
+        PineconeDB,
+        "_fetch_index_meta",
+        lambda self, name: IndexMeta(name=name, total_vector_count=counts[name]),
+    )
+    cfg = PineconeDBConfig(
+        collection_name="empty-idx",
+        embedding_model=HashEmbeddingModel(),
+    )
+    db = PineconeDB(cfg)
+    # Wire delete_collection to our tracker
+    db.delete_collection = lambda collection_name: deleted.append(collection_name)
+
+    n = db.clear_empty_collections()
+
+    assert n == 1
+    assert deleted == ["empty-idx"], (
+        f"expected only empty-idx deleted, got {deleted}"
+    )

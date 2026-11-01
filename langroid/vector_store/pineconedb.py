@@ -92,8 +92,11 @@ class PineconeDB(VectorStore):
         for index in indexes:
             if index.total_vector_count == -1:
                 logger.warning(
-                    f"Error fetching details for {index.name} when scanning indexes"
+                    f"Could not read stats for {index.name}, skipping deletion"
                 )
+                continue
+            if index.total_vector_count != 0:
+                continue
             n_deletes += 1
             self.delete_collection(collection_name=index.name)
         return n_deletes
